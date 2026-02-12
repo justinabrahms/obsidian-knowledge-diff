@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/ruff-action@v3
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Verify script compiles
+        run: uv run python -m py_compile obsidian-knowledge-diff.py
+
+      - name: CLI help works
+        run: uv run obsidian-knowledge-diff.py --help
+
+      - name: Init command works
+        run: |
+          uv run obsidian-knowledge-diff.py init --vault /tmp/test-vault
+          test -f ~/.config/obsidian-knowledge-diff/config.toml
+
+      - name: Info command works on sample PDF
+        run: |
+          # Create a minimal PDF for testing
+          uv run python -c "
+          import pymupdf
+          doc = pymupdf.open()
+          page = doc.new_page()
+          page.insert_text((72, 72), 'Chapter 1: Hello World\n\nThis is a test page with some content.')
+          doc.save('/tmp/test.pdf')
+          doc.close()
+          "
+          uv run obsidian-knowledge-diff.py info /tmp/test.pdf
