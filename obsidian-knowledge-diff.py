@@ -204,11 +204,11 @@ def extract_toc(doc) -> list[tuple[int, str]]:
             continue
         # Update stack: set this level and clear deeper levels
         section_stack[level] = title
-        for l in list(section_stack.keys()):
-            if l > level:
-                del section_stack[l]
+        for lvl in list(section_stack.keys()):
+            if lvl > level:
+                del section_stack[lvl]
         # Build breadcrumb from shallowest to deepest
-        breadcrumb = " > ".join(section_stack[l] for l in sorted(section_stack.keys()))
+        breadcrumb = " > ".join(section_stack[k] for k in sorted(section_stack.keys()))
         transitions.append((page, breadcrumb))
 
     return transitions
@@ -676,7 +676,7 @@ def suggest_note_titles(results: list[dict], chat_model_id: str) -> None:
         model = llm.get_model(chat_model_id)
     except llm.UnknownModelError:
         console.print(f"  [yellow]Chat model '{chat_model_id}' not available. Skipping title suggestions.[/yellow]")
-        console.print(f"  [dim]Install the model plugin (e.g. `llm install llm-anthropic`) or use --no-titles[/dim]")
+        console.print("  [dim]Install the model plugin (e.g. `llm install llm-anthropic`) or use --no-titles[/dim]")
         return
 
     with Progress(
@@ -858,8 +858,8 @@ def cmd_diff(args):
 
     if not args.vault:
         console.print("[red]Error:[/red] No vault path configured.")
-        console.print(f"  Run: [bold]obsidian-knowledge-diff init --vault /path/to/vault[/bold]")
-        console.print(f"  Or pass: [bold]--vault /path/to/vault[/bold]")
+        console.print("  Run: [bold]obsidian-knowledge-diff init --vault /path/to/vault[/bold]")
+        console.print("  Or pass: [bold]--vault /path/to/vault[/bold]")
         sys.exit(1)
 
     vault_path = Path(args.vault).expanduser().resolve()

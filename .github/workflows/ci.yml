@@ -33,12 +33,13 @@ jobs:
 
       - name: Info command works on sample PDF
         run: |
-          # Create a minimal PDF for testing
-          uv run python -c "
+          # Create a minimal PDF using the script's own dependency environment
+          uv run --with pymupdf python -c "
           import pymupdf
           doc = pymupdf.open()
           page = doc.new_page()
-          page.insert_text((72, 72), 'Chapter 1: Hello World\n\nThis is a test page with some content.')
+          page.insert_text((72, 72), 'Chapter 1: Hello World')
+          page.insert_text((72, 100), 'This is a test page with enough content to be meaningful.')
           doc.save('/tmp/test.pdf')
           doc.close()
           "
