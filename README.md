@@ -1,12 +1,12 @@
 # obsidian-knowledge-diff
 
-Diff a PDF book against your Obsidian vault. Produces a prioritized reading plan showing what's novel, what deepens your existing knowledge, and what you can skim.
+Diff a document against your Obsidian vault. Feed it a book, article, paper, or report and get a prioritized reading plan showing what's novel, what deepens your existing knowledge, and what you can skim.
 
 ## How it works
 
 1. Embeds your Obsidian vault notes using a local sentence-transformer model
-2. Extracts and embeds chunks from a PDF book
-3. Compares each book chunk against your vault via cosine similarity
+2. Extracts and embeds chunks from a document
+3. Compares each chunk against your vault via cosine similarity
 4. Classifies chunks as **novel**, **depth gap**, or **review**
 5. Optionally suggests Obsidian note titles for novel content using an LLM
 
@@ -29,7 +29,7 @@ uv run obsidian-knowledge-diff.py init --vault ~/obsidian-vault
 uv run obsidian-knowledge-diff.py diff ~/books/some-book.pdf
 
 # 3. Open the report
-# => ./some-obsidian-knowledge-diff.md
+# => ./some-book-diff.md
 ```
 
 ## Configuration
@@ -63,23 +63,23 @@ All config values can be overridden with CLI flags (e.g. `--vault`, `--model`, `
 
 ### `diff`
 
-Full pipeline: extract PDF, embed everything, compute diff, generate report.
+Full pipeline: extract document, embed everything, compute diff, generate report.
 
 ```bash
-uv run obsidian-knowledge-diff.py diff book.pdf
-uv run obsidian-knowledge-diff.py diff book.pdf --vault ~/other-vault
-uv run obsidian-knowledge-diff.py diff book.pdf --no-titles          # skip LLM title suggestions
-uv run obsidian-knowledge-diff.py diff book.pdf --keep-backmatter     # don't filter index/endnotes
+uv run obsidian-knowledge-diff.py diff document.pdf
+uv run obsidian-knowledge-diff.py diff document.pdf --vault ~/other-vault
+uv run obsidian-knowledge-diff.py diff document.pdf --no-titles          # skip LLM title suggestions
+uv run obsidian-knowledge-diff.py diff document.pdf --keep-backmatter    # don't filter index/endnotes
 ```
 
-Output is written to `./book-name-diff.md` in the current directory.
+Output is written to `./document-name-diff.md` in the current directory.
 
 ### `info`
 
-Preview PDF extraction without embedding. Shows title, author, ISBN, TOC, chunking, and back-matter filtering.
+Preview document extraction without embedding. Shows title, author, ISBN, TOC, chunking, and back-matter filtering.
 
 ```bash
-uv run obsidian-knowledge-diff.py info book.pdf
+uv run obsidian-knowledge-diff.py info document.pdf
 ```
 
 ### `clear-cache`

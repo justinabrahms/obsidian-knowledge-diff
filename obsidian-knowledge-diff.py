@@ -11,16 +11,16 @@
 # ]
 # ///
 """
-obsidian-knowledge-diff: Diff a PDF book against your Obsidian vault.
+obsidian-knowledge-diff: Diff a document against your Obsidian vault.
 
-Embeds both your vault notes and a PDF book, then compares them to produce
-a prioritized reading plan showing what's novel, what's a depth gap, and
-what's review.
+Embeds both your vault notes and a document (book, article, paper, etc.),
+then compares them to produce a prioritized reading plan showing what's
+novel, what's a depth gap, and what's review.
 
 Usage:
-    uv run obsidian-knowledge-diff.py diff <pdf>              # full diff
-    uv run obsidian-knowledge-diff.py diff <pdf> -m 3-large   # different embedding model
-    uv run obsidian-knowledge-diff.py info <pdf>              # preview PDF chunks
+    uv run obsidian-knowledge-diff.py diff <file>             # full diff
+    uv run obsidian-knowledge-diff.py diff <file> -m 3-large  # different embedding model
+    uv run obsidian-knowledge-diff.py info <file>             # preview extraction
     uv run obsidian-knowledge-diff.py clear-cache             # wipe embedding cache
 """
 
@@ -692,7 +692,7 @@ def suggest_note_titles(results: list[dict], chat_model_id: str) -> None:
             preview = r["text_preview"][:500]
             prompt = (
                 "You are helping organize an Obsidian knowledge base. "
-                "Given this excerpt from a book, suggest a concise note title "
+                "Given this excerpt from a document, suggest a concise note title "
                 "(2-6 words) that captures the core concept. "
                 "The title should work as a standalone Obsidian note name — "
                 "no book-specific context, just the concept itself. "
@@ -798,7 +798,7 @@ def generate_report(
     if depth_gap:
         lines.append("## Medium Priority: Depth Gaps")
         lines.append("")
-        lines.append("You have notes on these topics, but the book goes deeper.")
+        lines.append("You have notes on these topics, but the source goes deeper.")
         lines.append("")
         for r in sorted(depth_gap, key=lambda x: x["top_score"]):
             heading = format_chunk_heading(r)
@@ -853,7 +853,7 @@ def cmd_diff(args):
     """Run the full diff pipeline."""
     pdf_path = Path(args.pdf).expanduser().resolve()
     if not pdf_path.exists():
-        console.print(f"[red]Error:[/red] PDF not found: {pdf_path}")
+        console.print(f"[red]Error:[/red] File not found: {pdf_path}")
         sys.exit(1)
 
     if not args.vault:
@@ -874,7 +874,7 @@ def cmd_diff(args):
     console.print()
 
     # 1. Extract and chunk PDF
-    console.print("[bold]1. Extracting PDF...[/bold]")
+    console.print("[bold]1. Extracting document...[/bold]")
     pages, toc, book_info = extract_pdf_text(pdf_path)
     if toc:
         console.print(f"  TOC: {len(toc)} entries")
@@ -943,13 +943,13 @@ def cmd_diff(args):
 
 
 def cmd_info(args):
-    """Preview PDF extraction and chunking without embedding."""
+    """Preview document extraction and chunking without embedding."""
     pdf_path = Path(args.pdf).expanduser().resolve()
     if not pdf_path.exists():
-        console.print(f"[red]Error:[/red] PDF not found: {pdf_path}")
+        console.print(f"[red]Error:[/red] File not found: {pdf_path}")
         sys.exit(1)
 
-    console.print(f"[bold]PDF Info:[/bold] {pdf_path.name}")
+    console.print(f"[bold]Document Info:[/bold] {pdf_path.name}")
     console.print()
 
     pages, toc, book_info = extract_pdf_text(pdf_path)
@@ -976,7 +976,7 @@ def cmd_info(args):
         if len(toc) > 20:
             console.print(f"  ... and {len(toc) - 20} more")
     else:
-        console.print("TOC: [dim]none (no bookmarks in PDF)[/dim]")
+        console.print("TOC: [dim]none (no bookmarks found)[/dim]")
     console.print()
 
     # Show back-matter filtering info
@@ -1060,7 +1060,7 @@ skip_dirs = [".obsidian", ".trash", ".git"]
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Diff a PDF book against your Obsidian vault",
+        description="Diff a document against your Obsidian vault",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -1074,7 +1074,7 @@ def main():
 
     # diff
     diff_parser = subparsers.add_parser("diff", help="Full diff: embed + compare + report")
-    diff_parser.add_argument("pdf", help="Path to PDF file")
+    diff_parser.add_argument("pdf", help="Path to document (PDF)")
     diff_parser.add_argument("-m", "--model", default=model_default,
                                help=f"Embedding model (default: {model_default})")
     diff_parser.add_argument("--vault", default=vault_default,
@@ -1091,8 +1091,8 @@ def main():
     diff_parser.set_defaults(func=cmd_diff)
 
     # info
-    info_parser = subparsers.add_parser("info", help="Preview PDF chunks without embedding")
-    info_parser.add_argument("pdf", help="Path to PDF file")
+    info_parser = subparsers.add_parser("info", help="Preview document chunks without embedding")
+    info_parser.add_argument("pdf", help="Path to document (PDF)")
     info_parser.set_defaults(func=cmd_info)
 
     # clear-cache
