@@ -26,9 +26,11 @@ Usage:
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
+from collections import Counter
 from collections import defaultdict
 from pathlib import Path
 
@@ -277,22 +279,58 @@ def extract_pdf_text(pdf_path: Path) -> tuple[list[dict], list[tuple[int, str]],
     return pages, toc, book_info
 
 
-BACKMATTER_PATTERNS = re.compile(
-    r"^(index|endnotes?|notes|bibliography|references|acknowledgm?ents|glossary|about the authors?)$",
+BACKMATTER_STRICT_PATTERNS = re.compile(
+    r"^(index|endnotes?|bibliography|references|glossary)$",
     re.IGNORECASE,
 )
 
+BACKMATTER_SOFT_PATTERNS = re.compile(
+    r"^(notes|acknowledgm?ents|about the authors?)$",
+    re.IGNORECASE,
+)
 
-def detect_backmatter_start(toc: list[tuple[int, str]]) -> int | None:
+# Only treat candidates as back-matter if they appear late enough in the book.
+BACKMATTER_STRICT_MIN_RATIO = 0.50
+BACKMATTER_SOFT_MIN_RATIO = 0.70
+
+
+def detect_backmatter_start(toc: list[tuple[int, str]], total_pages: int | None = None) -> int | None:
     """Find the page where back-matter begins, based on TOC entries.
 
     Returns the page number of the first back-matter section, or None.
+    Ambiguous labels (like "about the author") are only treated as back-matter
+    when they appear near the end of the document.
     """
+    strict_candidates = []
+    soft_candidates = []
+
     for page, breadcrumb in toc:
         # Check the deepest (last) part of the breadcrumb
         leaf = breadcrumb.split(" > ")[-1].strip()
-        if BACKMATTER_PATTERNS.match(leaf):
-            return page
+        if BACKMATTER_STRICT_PATTERNS.match(leaf):
+            strict_candidates.append(page)
+        elif BACKMATTER_SOFT_PATTERNS.match(leaf):
+            soft_candidates.append(page)
+
+    if strict_candidates:
+        if not total_pages:
+            return min(strict_candidates)
+        late_strict = [
+            p for p in strict_candidates
+            if (p / total_pages) >= BACKMATTER_STRICT_MIN_RATIO
+        ]
+        if late_strict:
+            return min(late_strict)
+
+    if soft_candidates and total_pages:
+        # Soft labels are often used in front-matter; only trust them near the end.
+        late_soft = [
+            p for p in soft_candidates
+            if (p / total_pages) >= BACKMATTER_SOFT_MIN_RATIO
+        ]
+        if late_soft:
+            return min(late_soft)
+
     return None
 
 
@@ -313,7 +351,8 @@ def filter_backmatter(
 
     Uses TOC if available, falls back to heuristic detection.
     """
-    backmatter_start = detect_backmatter_start(toc) if toc else None
+    total_pages = max((p["page"] for p in pages), default=0)
+    backmatter_start = detect_backmatter_start(toc, total_pages=total_pages) if toc else None
 
     filtered = []
     removed = 0
@@ -572,7 +611,8 @@ def compute_diff(
                 "end_page": chunk["end_page"],
                 "word_count": chunk["word_count"],
                 "section": chunk.get("section"),
-                "text_preview": chunk["text"][:200],
+                "text": chunk["text"],
+                "text_preview": chunk["text"][:1200],
                 "top_score": top_score,
                 "classification": classification,
                 "matches": matches,
@@ -663,9 +703,32 @@ def vault_id_to_wikilink(vault_id: str) -> str:
     return f"[[{name}]]"
 
 
+def _group_chunks_for_batching(novel: list[dict], batch_size: int = 15) -> list[list[dict]]:
+    """Group novel chunks into batches for batched title generation.
+
+    Chunks are grouped by TOC section first, then by page proximity.
+    """
+    # Group by section
+    keyed = sorted(novel, key=lambda r: (r.get("section") or "", r.get("start_page", 0)))
+    batches: list[list[dict]] = []
+    current_batch: list[dict] = []
+
+    for r in keyed:
+        current_batch.append(r)
+        if len(current_batch) >= batch_size:
+            batches.append(current_batch)
+            current_batch = []
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
 def suggest_note_titles(results: list[dict], chat_model_id: str) -> None:
     """Use a chat model to suggest Obsidian note titles for novel chunks.
 
+    Sends chunks in batches so the model can see related content and assign
+    consistent titles across chunks that cover the same concept.
     Mutates results in-place, adding a 'suggested_title' key to novel items.
     """
     novel = [r for r in results if r["classification"] == "novel"]
@@ -679,6 +742,8 @@ def suggest_note_titles(results: list[dict], chat_model_id: str) -> None:
         console.print("  [dim]Install the model plugin (e.g. `llm install llm-anthropic`) or use --no-titles[/dim]")
         return
 
+    batches = _group_chunks_for_batching(novel)
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -687,29 +752,145 @@ def suggest_note_titles(results: list[dict], chat_model_id: str) -> None:
         console=console,
     ) as progress:
         task = progress.add_task("  Suggesting note titles...", total=len(novel))
-        for r in novel:
-            section = r.get("section") or ""
-            preview = r["text_preview"][:500]
+        for batch in batches:
+            # Build a single prompt for the whole batch
             prompt = (
                 "You are helping organize an Obsidian knowledge base. "
-                "Given this excerpt from a document, suggest a concise note title "
-                "(2-6 words) that captures the core concept. "
-                "The title should work as a standalone Obsidian note name — "
-                "no book-specific context, just the concept itself. "
-                "Reply with ONLY the title, nothing else.\n\n"
+                "Below are several excerpts from a document. For each excerpt, suggest a concise "
+                "note title (2-4 words preferred, 5 max) that captures the core concept.\n\n"
+                "IMPORTANT:\n"
+                "- Multiple excerpts may warrant the SAME note title if they cover the same concept. "
+                "Reuse titles aggressively.\n"
+                "- Titles should work as standalone Obsidian note names — no book-specific context.\n"
+                "- Prefer short, broad titles (e.g. 'Managerial Leverage' not 'Managerial Leverage Principles').\n\n"
+                "Return valid JSON only, as a list of objects with 'index' and 'title' keys:\n"
+                '[{"index": 0, "title": "Some Title"}, ...]\n\n'
             )
-            if section:
-                prompt += f"Book section: {section}\n\n"
-            prompt += f"Excerpt:\n{preview}"
+
+            for i, r in enumerate(batch):
+                section = r.get("section") or ""
+                preview = r["text_preview"][:400]
+                prompt += f"--- Excerpt {i} ---\n"
+                if section:
+                    prompt += f"Section: {section}\n"
+                prompt += f"Pages: {r.get('start_page', '?')}-{r.get('end_page', '?')}\n"
+                prompt += f"{preview}\n\n"
 
             try:
                 response = model.prompt(prompt)
-                title = str(response).strip().strip('"').strip("'")
-                r["suggested_title"] = title
+                raw = str(response).strip()
+                # Handle fenced JSON
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+                    raw = re.sub(r"\s*```$", "", raw)
+                    raw = raw.strip()
+                if not raw.startswith("["):
+                    match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
+                    if match:
+                        raw = match.group(0)
+                data = json.loads(raw)
+                for item in data:
+                    idx = item.get("index")
+                    title = (item.get("title") or "").strip().strip('"').strip("'")
+                    if idx is not None and 0 <= idx < len(batch) and title:
+                        batch[idx]["suggested_title"] = title
             except Exception as e:
-                console.print(f"  [dim]Title generation failed: {e}[/dim]")
-                r["suggested_title"] = None
-            progress.advance(task)
+                console.print(f"  [dim]Batch title generation failed, falling back to per-chunk: {e}[/dim]")
+                # Fallback: generate titles individually for this batch
+                for r in batch:
+                    if r.get("suggested_title"):
+                        progress.advance(task)
+                        continue
+                    section = r.get("section") or ""
+                    preview = r["text_preview"][:500]
+                    fallback_prompt = (
+                        "You are helping organize an Obsidian knowledge base. "
+                        "Suggest a concise note title (2-4 words) for this excerpt. "
+                        "Reply with ONLY the title.\n\n"
+                    )
+                    if section:
+                        fallback_prompt += f"Section: {section}\n\n"
+                    fallback_prompt += f"Excerpt:\n{preview}"
+                    try:
+                        resp = model.prompt(fallback_prompt)
+                        r["suggested_title"] = str(resp).strip().strip('"').strip("'")
+                    except Exception:
+                        r["suggested_title"] = None
+                    progress.advance(task)
+                continue
+
+            # Mark any chunks that didn't get a title from the batch
+            for r in batch:
+                if not r.get("suggested_title"):
+                    r["suggested_title"] = None
+                progress.advance(task)
+
+
+def consolidate_suggested_titles(results: list[dict], chat_model_id: str) -> None:
+    """Use one LLM pass to cluster near-duplicate titles to canonical forms."""
+    titled = [r for r in results if r.get("suggested_title")]
+    if not titled:
+        return
+
+    unique_titles = sorted({r["suggested_title"].strip() for r in titled if r["suggested_title"].strip()})
+    if len(unique_titles) <= 1:
+        return
+
+    try:
+        model = llm.get_model(chat_model_id)
+    except llm.UnknownModelError:
+        console.print(f"  [yellow]Chat model '{chat_model_id}' not available. Skipping title consolidation.[/yellow]")
+        return
+
+    title_counts = Counter(r["suggested_title"].strip() for r in titled if r["suggested_title"].strip())
+    prompt = (
+        "You are normalizing Obsidian note titles for deduplication.\n"
+        "Task: group semantically equivalent titles and map EVERY title to a canonical title.\n\n"
+        "Rules:\n"
+        "1) Be aggressive about merging near-duplicates with the same core concept.\n"
+        "2) You MAY create new shorter canonical titles that better capture the concept.\n"
+        "3) Prefer 2-3 word titles over 4+ word titles when the shorter form is unambiguous.\n"
+        "4) Preserve distinct concepts; merge only when concept overlap is strong.\n"
+        "5) Output valid JSON only.\n\n"
+        "Examples of expected merges:\n"
+        "- Managerial Leverage Principles / Managerial Leverage Concept / Managerial Time Leverage -> Managerial Leverage\n"
+        "- Effective Meeting Management / Effective Meeting Practices / Effective Meeting Strategies -> Effective Meetings\n"
+        "- Dual Reporting Structure / Dual Reporting Structures -> Dual Reporting\n\n"
+        "Return schema (include one mapping for every title below):\n"
+        "{\"mappings\": [{\"from\": \"Original\", \"to\": \"Canonical\"}, ...]}\n\n"
+        "Titles (with frequency):\n"
+    )
+    for t in unique_titles:
+        prompt += f"- {t} (count: {title_counts[t]})\n"
+
+    remap = {t: t for t in unique_titles}
+    try:
+        response = model.prompt(prompt)
+        raw = str(response).strip()
+        # Handle fenced JSON responses robustly.
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"\s*```$", "", raw)
+            raw = raw.strip()
+        if not raw.startswith("{"):
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if match:
+                raw = match.group(0)
+        data = json.loads(raw)
+        mappings = data.get("mappings", []) if isinstance(data, dict) else []
+        for m in mappings:
+            src = (m.get("from") or "").strip()
+            dst = (m.get("to") or "").strip()
+            if src in remap and dst:
+                remap[src] = dst
+    except Exception as e:
+        console.print(f"  [dim]Title consolidation skipped: {e}[/dim]")
+        return
+
+    for r in titled:
+        src = r["suggested_title"].strip()
+        if src in remap:
+            r["suggested_title"] = remap[src]
 
 
 def score_histogram(results: list[dict]) -> str:
@@ -731,6 +912,135 @@ def score_histogram(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+STOPWORDS = {
+    "about", "after", "again", "against", "also", "among", "because", "been", "before", "being",
+    "between", "both", "could", "each", "from", "have", "having", "into", "just", "many", "more",
+    "most", "much", "must", "only", "other", "over", "same", "some", "such", "than", "that", "their",
+    "them", "then", "there", "these", "they", "this", "those", "through", "under", "until", "very",
+    "what", "when", "where", "which", "while", "with", "would", "your", "will", "should", "make",
+    "made", "might", "cannot", "could", "can", "also", "even", "still", "just",
+}
+
+
+def truncate_words(text: str, max_words: int) -> str:
+    """Truncate text to a natural boundary near max_words."""
+    words = text.split()
+    if len(words) <= max_words:
+        return " ".join(words)
+
+    # Prefer ending at sentence punctuation in a small lookahead window.
+    tail_limit = min(len(words), max_words + 35)
+    for i in range(max_words, tail_limit):
+        token = words[i - 1]
+        if token.endswith((".", "!", "?")):
+            return " ".join(words[:i])
+
+    # Otherwise, cut at max_words.
+    return " ".join(words[:max_words]) + "..."
+
+
+def key_terms(text: str, n: int = 6) -> list[str]:
+    """Extract lightweight key terms from a chunk."""
+    tokens = re.findall(r"\b[a-z][a-z'-]{3,}\b", text.lower())
+    filtered = [t for t in tokens if t not in STOPWORDS]
+    counts = Counter(filtered)
+    return [word for word, _ in counts.most_common(n)]
+
+
+def format_chunk_context(r: dict) -> list[str]:
+    """Build richer chunk context lines for report sections."""
+    lines = []
+    text = (r.get("text") or r.get("text_preview") or "").replace("\n", " ").strip()
+    if not text:
+        return lines
+
+    terms = key_terms(text)
+    if terms:
+        lines.append(f"*Key terms:* {', '.join(terms)}")
+        lines.append("")
+
+    long_excerpt = truncate_words(text, 220)
+    lines.append("<details>")
+    lines.append("<summary>Excerpt</summary>")
+    lines.append("")
+    for excerpt_line in long_excerpt.split("\n"):
+        lines.append(f"> {excerpt_line}" if excerpt_line.strip() else ">")
+    lines.append("")
+    lines.append("</details>")
+    lines.append("")
+    return lines
+
+
+def merge_matches(items: list[dict], limit: int = 5) -> list[dict]:
+    """Merge match lists from multiple chunks, keeping best score per vault note."""
+    by_id = {}
+    for item in items:
+        for m in item.get("matches", []):
+            mid = m["id"]
+            if mid not in by_id or m["score"] > by_id[mid]["score"]:
+                by_id[mid] = {
+                    "id": mid,
+                    "score": m["score"],
+                    "content": m.get("content"),
+                }
+    return sorted(by_id.values(), key=lambda x: -x["score"])[:limit]
+
+
+def group_adjacent_results(items: list[dict]) -> list[dict]:
+    """Merge adjacent chunks in the same section into larger reading blocks."""
+    if not items:
+        return []
+
+    def finalize(group: list[dict]) -> dict:
+        section = group[0].get("section")
+        start_page = min(g["start_page"] for g in group)
+        end_page = max(g["end_page"] for g in group)
+        word_count = sum(g.get("word_count", 0) for g in group)
+        text = "\n\n".join(
+            (g.get("text") or g.get("text_preview") or "").strip()
+            for g in group
+            if (g.get("text") or g.get("text_preview"))
+        ).strip()
+        suggested = [g.get("suggested_title") for g in group if g.get("suggested_title")]
+        suggested_title = Counter(suggested).most_common(1)[0][0] if suggested else None
+        depth_reasons = []
+        for g in group:
+            if g.get("depth_gap_reason") and g["depth_gap_reason"] not in depth_reasons:
+                depth_reasons.append(g["depth_gap_reason"])
+        return {
+            "chunk_index": min(g.get("chunk_index", 0) for g in group),
+            "start_page": start_page,
+            "end_page": end_page,
+            "word_count": word_count,
+            "section": section,
+            "text": text,
+            "text_preview": text[:1200],
+            # Conservative priority: preserve the "most novel / weakest match" score in the block.
+            "top_score": min(g["top_score"] for g in group),
+            "classification": group[0]["classification"],
+            "matches": merge_matches(group, limit=5),
+            "suggested_title": suggested_title,
+            "depth_gap_reason": " | ".join(depth_reasons) if depth_reasons else None,
+            "chunk_count": len(group),
+        }
+
+    ordered = sorted(items, key=lambda x: (x["start_page"], x["end_page"], x.get("chunk_index", 0)))
+    grouped = []
+    current = [ordered[0]]
+
+    for item in ordered[1:]:
+        prev = current[-1]
+        same_section = item.get("section") == prev.get("section")
+        contiguous = item["start_page"] <= prev["end_page"] + 1
+        if same_section and contiguous:
+            current.append(item)
+        else:
+            grouped.append(finalize(current))
+            current = [item]
+    grouped.append(finalize(current))
+    return grouped
+
+
 def generate_report(
     results: list[dict],
     book_info: dict,
@@ -738,9 +1048,16 @@ def generate_report(
     review_threshold: float,
 ) -> str:
     """Generate the markdown diff report."""
-    novel = [r for r in results if r["classification"] == "novel"]
-    depth_gap = [r for r in results if r["classification"] == "depth_gap"]
+    novel_chunks = [r for r in results if r["classification"] == "novel"]
+    depth_gap_chunks = [r for r in results if r["classification"] == "depth_gap"]
     review = [r for r in results if r["classification"] == "review"]
+    novel = group_adjacent_results(novel_chunks)
+    depth_gap = group_adjacent_results(depth_gap_chunks)
+    suggested_counts = Counter(
+        r["suggested_title"].strip()
+        for r in novel_chunks
+        if r.get("suggested_title") and r["suggested_title"].strip()
+    )
 
     # Build title line
     title = book_info["title"]
@@ -762,11 +1079,35 @@ def generate_report(
     lines.append("| Category | Count | % |")
     lines.append("|---|---|---|")
     total = len(results)
-    for label, items in [("Novel", novel), ("Depth Gap", depth_gap), ("Review", review)]:
+    for label, items in [("Novel", novel_chunks), ("Depth Gap", depth_gap_chunks), ("Review", review)]:
         pct = f"{100 * len(items) / total:.0f}" if total else "0"
         lines.append(f"| {label} | {len(items)} | {pct}% |")
     lines.append(f"| **Total chunks** | **{total}** | |")
     lines.append("")
+
+    lines.append("### Suggested Notes To Add")
+    lines.append("")
+    if suggested_counts:
+        for title, count in sorted(suggested_counts.items(), key=lambda x: (-x[1], x[0].lower())):
+            suffix = f" (x{count})" if count > 1 else ""
+            lines.append(f"- [[{title}]]{suffix}")
+    else:
+        lines.append("- None generated (title suggestions disabled or unavailable).")
+    lines.append("")
+
+    # Notes that would increase in depth
+    depth_notes = Counter()
+    for r in depth_gap_chunks:
+        if r["matches"]:
+            link = vault_id_to_wikilink(r["matches"][0]["id"])
+            depth_notes[link] += 1
+    if depth_notes:
+        lines.append("### Notes That Would Increase in Depth")
+        lines.append("")
+        for link, count in sorted(depth_notes.items(), key=lambda x: (-x[1], x[0].lower())):
+            suffix = f" (x{count})" if count > 1 else ""
+            lines.append(f"- {link}{suffix}")
+        lines.append("")
 
     # Thresholds used
     lines.append(f"> Thresholds: novel < {novel_threshold}, review >= {review_threshold}")
@@ -777,17 +1118,20 @@ def generate_report(
         lines.append("## High Priority: Novel Content")
         lines.append("")
         lines.append("These sections have low similarity to anything in your vault.")
+        if len(novel) != len(novel_chunks):
+            lines.append(f"*Grouped into {len(novel)} reading blocks from {len(novel_chunks)} chunks.*")
         lines.append("")
         for r in sorted(novel, key=lambda x: x["top_score"]):
             heading = format_chunk_heading(r)
             lines.append(f"### {heading} (score: {r['top_score']:.2f})")
             lines.append("")
+            if r.get("chunk_count", 1) > 1:
+                lines.append(f"*Merged from {r['chunk_count']} adjacent chunks*")
+                lines.append("")
             if r.get("suggested_title"):
                 lines.append(f"**Suggested note:** [[{r['suggested_title']}]]")
                 lines.append("")
-            preview = r["text_preview"].replace("\n", " ")[:150]
-            lines.append(f"> {preview}...")
-            lines.append("")
+            lines.extend(format_chunk_context(r))
             if r["matches"]:
                 nearest = r["matches"][0]
                 link = vault_id_to_wikilink(nearest["id"])
@@ -799,14 +1143,17 @@ def generate_report(
         lines.append("## Medium Priority: Depth Gaps")
         lines.append("")
         lines.append("You have notes on these topics, but the source goes deeper.")
+        if len(depth_gap) != len(depth_gap_chunks):
+            lines.append(f"*Grouped into {len(depth_gap)} reading blocks from {len(depth_gap_chunks)} chunks.*")
         lines.append("")
         for r in sorted(depth_gap, key=lambda x: x["top_score"]):
             heading = format_chunk_heading(r)
             lines.append(f"### {heading} (score: {r['top_score']:.2f})")
             lines.append("")
-            preview = r["text_preview"].replace("\n", " ")[:150]
-            lines.append(f"> {preview}...")
-            lines.append("")
+            if r.get("chunk_count", 1) > 1:
+                lines.append(f"*Merged from {r['chunk_count']} adjacent chunks*")
+                lines.append("")
+            lines.extend(format_chunk_context(r))
             # Show matching vault notes
             seen_links = set()
             for m in r["matches"][:3]:
@@ -916,6 +1263,7 @@ def cmd_diff(args):
         if novel_count:
             console.print(f"[bold]5. Suggesting note titles ({novel_count} novel chunks)...[/bold]")
             suggest_note_titles(results, args.chat_model)
+            consolidate_suggested_titles(results, args.chat_model)
             console.print()
 
     # 6. Generate report
