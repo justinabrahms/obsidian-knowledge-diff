@@ -59,10 +59,10 @@ DEFAULTS = {
     "chat_model": "claude-3.5-haiku",
     "novel_threshold": 0.50,
     "review_threshold": 0.65,
-    "skip_dirs": [".obsidian", ".trash", ".git"],
+    "skip_dirs": [".obsidian", ".trash", ".git", "daily", "llm-assistant"],
 }
 
-DEFAULT_SKIP_DIRS = {".obsidian", ".trash", ".git"}
+DEFAULT_SKIP_DIRS = {".obsidian", ".trash", ".git", "daily", "llm-assistant"}
 
 
 def load_config() -> dict:
@@ -1085,7 +1085,7 @@ def generate_report(
     lines.append(f"| **Total chunks** | **{total}** | |")
     lines.append("")
 
-    lines.append("### Suggested Notes To Add")
+    lines.append("## Suggested Notes To Add")
     lines.append("")
     if suggested_counts:
         for title, count in sorted(suggested_counts.items(), key=lambda x: (-x[1], x[0].lower())):
@@ -1102,16 +1102,12 @@ def generate_report(
             link = vault_id_to_wikilink(r["matches"][0]["id"])
             depth_notes[link] += 1
     if depth_notes:
-        lines.append("### Notes That Would Increase in Depth")
+        lines.append("## Notes That Would Increase in Depth")
         lines.append("")
         for link, count in sorted(depth_notes.items(), key=lambda x: (-x[1], x[0].lower())):
             suffix = f" (x{count})" if count > 1 else ""
             lines.append(f"- {link}{suffix}")
         lines.append("")
-
-    # Thresholds used
-    lines.append(f"> Thresholds: novel < {novel_threshold}, review >= {review_threshold}")
-    lines.append("")
 
     # Novel sections
     if novel:
@@ -1185,6 +1181,8 @@ def generate_report(
 
     # Histogram
     lines.append("## Score Distribution")
+    lines.append("")
+    lines.append(f"> Thresholds: novel < {novel_threshold}, review >= {review_threshold}")
     lines.append("")
     lines.append(score_histogram(results))
     lines.append("")
@@ -1393,7 +1391,7 @@ novel_threshold = 0.50
 review_threshold = 0.65
 
 # Directories to skip when scanning the vault
-skip_dirs = [".obsidian", ".trash", ".git"]
+skip_dirs = [".obsidian", ".trash", ".git", "daily", "llm-assistant"]
 '''
     vault_hint = args.vault or "/path/to/your/obsidian-vault"
     CONFIG_FILE.write_text(template.format(vault=vault_hint), encoding="utf-8")

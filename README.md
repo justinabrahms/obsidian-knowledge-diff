@@ -54,7 +54,7 @@ novel_threshold = 0.50
 review_threshold = 0.65
 
 # Directories to skip when scanning the vault
-skip_dirs = [".obsidian", ".trash", ".git"]
+skip_dirs = [".obsidian", ".trash", ".git", "daily", "llm-assistant"]
 ```
 
 All config values can be overridden with CLI flags (e.g. `--vault`, `--model`, `--novel-threshold`).
